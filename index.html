@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Infinite 3D Canvas</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400&display=swap"
+    />
+    <link rel="stylesheet" href="hark.css" />
+    <link rel="stylesheet" href="hark-hero.css" />
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #05060d; }
+      .x-stage { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; outline: none; user-select: none; -webkit-user-select: none; }
+      .x-hud {
+        position: fixed; left: 12px; top: 12px; max-width: min(340px, calc(100vw - 24px));
+        padding: 12px 14px; display: grid; gap: 8px;
+        background: var(--mat-regular); -webkit-backdrop-filter: var(--hark-blur); backdrop-filter: var(--hark-blur);
+        border: 1px solid var(--stroke-secondary); border-radius: var(--r-m); box-shadow: var(--hark-shadow);
+        color: var(--text-primary); font: var(--type-small);
+      }
+      .x-hud h1 { margin: 0; font: var(--type-label); letter-spacing: 0.01em; }
+      .x-coords { margin: 0; font-family: "Geist Mono", ui-monospace, monospace; font-size: var(--size-caption, 12px); color: var(--text-primary); white-space: pre; }
+      .x-hint { margin: 0; font: var(--type-caption); color: var(--text-secondary); }
+      .x-hud .links { margin: 0; }
+      .x-hud button.btn { cursor: pointer; font: inherit; }
+    </style>
+  </head>
+  <body>
+    <div class="page" id="top">
+      <canvas class="x-stage" id="c" tabindex="0" aria-label="Infinite 3D canvas of floating cards"></canvas>
+      <div class="x-hud" role="region" aria-label="Canvas controls">
+        <h1>Infinite 3D Canvas</h1>
+        <p class="x-coords" id="coords">x 0  y 0  z 0</p>
+        <div class="links">
+          <button class="btn" id="home" type="button">Home</button>
+          <button class="btn" id="dragmode" type="button" aria-pressed="false" title="Switch what dragging does: pan or rotate"><b>Pan</b>&nbsp;/ Rotate</button>
+          <button class="btn" id="reseed" type="button">New seed</button>
+        </div>
+        <p class="x-hint">Q/E up-down · drag toggle for rotate · Shift- or right-drag to rotate · Alt- or middle-drag to move up/down · Wheel or pinch to zoom · WASD / arrows to move · Drag a card to move it, Shift/Alt-drag to lift it · Touch: twist to turn, two-finger drag to tilt, three-finger drag up/down</p>
+      </div>
+    </div>
+    <script src="hark.js"></script>
+    <script>
+      (() => {
+        const cv = document.getElementById("c"), ctx = cv.getContext("2d"), hud = document.getElementById("coords");
+        const C = 500, NEAR = 8;
+        let W, H, F, bg, seed = 1 + ((Math.random() * 1e6) | 0), sky = [];
+        const cam = { tx: 0, ty: 0, tz: 0, yaw: 0.6, pitch: 0.55, dist: 900 };
+        const HOME = { tx: 0, ty: 0, tz: 0, yaw: 0.6, pitch: 0.55, dist: 900 };
+        let goal = null, E, Fw, R, U, dragMode = "pan";
+        const vel = { px: 0, py: 0, ry: 0, rp: 0, vy: 0 };
+        const chunks = new Map(), pinned = new Map(), keys = new Set();
+        let hits = [], hover = null, pulse = -1e9;
+
+        const hash = (a, b, s) => { let h = Math.imul(a, 374761393) ^ Math.imul(b, 668265263) ^ Math.imul(s, 2246822519); h = Math.imul(h ^ (h >>> 13), 1274126177); return (h ^ (h >>> 16)) >>> 0; };
+        const rng = (s) => () => { s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+        function makeSky() {
+          const r = rng(seed ^ 0x9e3779b9); sky = [];
+          for (let i = 0; i < 420; i++) {
+            const u = r() * 2 - 1, th = r() * Math.PI * 2, q = Math.sqrt(1 - u * u);
+            if (u > -0.08) sky.push([q * Math.cos(th), u, q * Math.sin(th), 0.3 + r() * 0.7, r()]);
+          }
+        }
+
+        function resize() {
+          const d = Math.min(devicePixelRatio || 1, 2);
+          W = innerWidth; H = innerHeight; cv.width = W * d; cv.height = H * d;
+          ctx.setTransform(d, 0, 0, d, 0, 0);
+          F = Math.min(W, H) * 1.1;
+          bg = ctx.createRadialGradient(W / 2, H * 0.35, 0, W / 2, H * 0.35, Math.hypot(W, H) * 0.7);
+          bg.addColorStop(0, "#14123a"); bg.addColorStop(0.5, "#0a0b20"); bg.addColorStop(1, "#04050b");
+        }
+
+        function basis() {
+          const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch), cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+          E = [cam.tx + cam.dist * cp * sy, cam.ty + cam.dist * sp, cam.tz + cam.dist * cp * cy];
+          Fw = [-cp * sy, -sp, -cp * cy]; R = [cy, 0, -sy]; U = [-sy * sp, cp, -cy * sp];
+        }
+        function toCam(x, y, z) { const a = x - E[0], b = y - E[1], c = z - E[2]; return [a * R[0] + c * R[2], a * U[0] + b * U[1] + c * U[2], a * Fw[0] + b * Fw[1] + c * Fw[2]]; }
+        function proj(x, y, z) { const p = toCam(x, y, z); return [W / 2 + (p[0] * F) / p[2], H / 2 - (p[1] * F) / p[2], p[2]]; }
+        function ray(sx, sy, y0) {
+          const dx = Fw[0] * F + R[0] * (sx - W / 2) + U[0] * (H / 2 - sy), dy = Fw[1] * F + U[1] * (H / 2 - sy), dz = Fw[2] * F + R[2] * (sx - W / 2) + U[2] * (H / 2 - sy);
+          if (Math.abs(dy) < 1e-6) return null; const t = (y0 - E[1]) / dy; return t > 0 ? [E[0] + dx * t, E[2] + dz * t] : null;
+        }
+
+        function gen(ix, iz) {
+          const r = rng(hash(ix, iz, seed)), n = 2 + ((r() * 3) | 0), cards = [], stars = [];
+          for (let i = 0; i < n; i++) {
+            const id = ix + "," + iz + "," + i;
+            const c = { id, x: ix * C + 40 + r() * (C - 80), z: iz * C + 40 + r() * (C - 80), y: 40 + r() * 320, w: 110 + r() * 90, h: 70 + r() * 50, hue: 170 + r() * 170, label: `${ix}, ${iz}`, sub: "card " + (i + 1) };
+            if (!pinned.has(id)) cards.push(c);
+          }
+          for (let i = 0; i < 8; i++) stars.push({ x: ix * C + r() * C, y: 30 + r() * 700, z: iz * C + r() * C, b: r(), star: 1 });
+          return { ix, iz, cards, stars };
+        }
+        function updChunks() {
+          const rad = Math.min(7, Math.ceil((cam.dist * 1.6 + 900) / C)), cx = Math.floor(cam.tx / C), cz = Math.floor(cam.tz / C);
+          for (let dx = -rad; dx <= rad; dx++) for (let dz = -rad; dz <= rad; dz++) {
+            if (dx * dx + dz * dz > rad * rad + 1) continue;
+            const k = cx + dx + "," + (cz + dz); if (!chunks.has(k)) chunks.set(k, gen(cx + dx, cz + dz));
+          }
+          for (const [k, ch] of chunks) if (Math.abs(ch.ix - cx) > rad + 1 || Math.abs(ch.iz - cz) > rad + 1) chunks.delete(k);
+          return rad * C;
+        }
+
+        function pan(dx, dy) {
+          const k = cam.dist / F, g = k / Math.max(Math.abs(Math.sin(cam.pitch)), 0.35), sy = Math.sin(cam.yaw), cy = Math.cos(cam.yaw);
+          cam.tx += -R[0] * dx * k - sy * dy * g; cam.tz += -R[2] * dx * k - cy * dy * g;
+        }
+        function rot(dx, dy) { cam.yaw -= dx * 0.006; cam.pitch = clamp(cam.pitch + dy * 0.005, -1.5, 1.5); }
+        function lift(dy) { cam.ty -= dy * (cam.dist / F); }
+        function zoom(f) { cam.dist = clamp(cam.dist * f, 160, 6000); }
+
+        function seg(a, b, style) {
+          let p = toCam(a[0], 0, a[1]), q = toCam(b[0], 0, b[1]);
+          if (p[2] < NEAR && q[2] < NEAR) return;
+          if (p[2] < NEAR || q[2] < NEAR) { const t = (NEAR - p[2]) / (q[2] - p[2]), m = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, NEAR]; if (p[2] < NEAR) p = m; else q = m; }
+          ctx.strokeStyle = style; ctx.beginPath();
+          ctx.moveTo(W / 2 + (p[0] * F) / p[2], H / 2 - (p[1] * F) / p[2]); ctx.lineTo(W / 2 + (q[0] * F) / q[2], H / 2 - (q[1] * F) / q[2]); ctx.stroke();
+        }
+        function grid(fogR) {
+          const sp = cam.dist > 2500 ? 250 : 100, n = Math.ceil(fogR / sp), gx = Math.round(cam.tx / sp) * sp, gz = Math.round(cam.tz / sp) * sp, S = 10, L = n * sp;
+          ctx.lineWidth = 1;
+          for (let i = -n; i <= n; i++) {
+            for (const axis of [0, 1]) {
+              const v = (axis ? gz : gx) + i * sp, major = Math.abs(v % C) < 0.5;
+              for (let s = 0; s < S; s++) {
+                const u0 = -L + (2 * L * s) / S, u1 = u0 + (2 * L) / S, um = (u0 + u1) / 2;
+                const mx = axis ? (axis ? gx + um : v) : v, mz = axis ? v : gz + um;
+                let a = 1 - Math.hypot(mx - cam.tx, mz - cam.tz) / fogR; if (a <= 0) continue; a *= a;
+                const style = major ? `rgba(220,110,255,${a * 0.28})` : `rgba(110,200,255,${a * 0.13})`;
+                if (axis) seg([gx + u0, v], [gx + u1, v], style); else seg([v, gz + u0], [v, gz + u1], style);
+              }
+            }
+          }
+        }
+
+        function drawCard(c, a, t) {
+          const p = proj(c.x, c.y, c.z); if (p[2] < NEAR) return;
+          const s = F / p[2], w = c.w * s, h = c.h * s; if (w < 2) return;
+          const x0 = p[0] - w / 2, y0 = p[1] - h / 2; if (x0 > W || y0 > H || x0 + w < 0 || y0 + h < -H) return;
+          const base = proj(c.x, 0, c.z), hov = c === hover || c === dragCard;
+          if (base[2] > NEAR) {
+            ctx.strokeStyle = `hsla(${c.hue},90%,70%,${a * 0.22})`; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(p[0], p[1] + h / 2); ctx.lineTo(base[0], base[1]); ctx.stroke();
+            const rx = (c.w * 0.4 * F) / base[2]; ctx.fillStyle = `hsla(${c.hue},90%,60%,${a * (hov ? 0.25 : 0.12)})`;
+            ctx.beginPath(); ctx.ellipse(base[0], base[1], rx, rx * Math.abs(Math.sin(cam.pitch)) * 0.5 + 0.5, 0, 0, Math.PI * 2); ctx.fill();
+          }
+          const g = ctx.createLinearGradient(x0, y0, x0 + w, y0 + h);
+          g.addColorStop(0, `hsla(${c.hue},88%,${hov ? 66 : 58}%,${a * 0.9})`); g.addColorStop(1, `hsla(${c.hue + 50},85%,${hov ? 52 : 42}%,${a * 0.8})`);
+          ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x0, y0, w, h, 12 * s) : ctx.rect(x0, y0, w, h);
+          if (hov) { ctx.shadowColor = `hsla(${c.hue},100%,70%,${a})`; ctx.shadowBlur = 28; }
+          ctx.fillStyle = g; ctx.fill(); ctx.shadowBlur = 0;
+          ctx.lineWidth = hov ? 2 : 1; ctx.strokeStyle = hov ? `rgba(255,255,255,${a * 0.95})` : `hsla(${c.hue},100%,85%,${a * 0.45})`; ctx.stroke();
+          if (16 * s > 5) {
+            ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+            ctx.fillStyle = `rgba(255,255,255,${a})`; ctx.font = `600 ${18 * s}px Geist, system-ui, sans-serif`;
+            ctx.fillText("(" + c.label + ")", x0 + 14 * s, y0 + 30 * s);
+            ctx.fillStyle = `rgba(255,255,255,${a * 0.7})`; ctx.font = `400 ${12 * s}px "Geist Mono", ui-monospace, monospace`;
+            ctx.fillText(c.sub, x0 + 14 * s, y0 + h - 14 * s);
+          }
+          t.push({ c, x0, y0, w, h });
+        }
+
+        function frame() {
+          // input → motion
+          const kx = (keys.has("a") || keys.has("arrowleft") ? 1 : 0) - (keys.has("d") || keys.has("arrowright") ? 1 : 0);
+          const ky = (keys.has("w") || keys.has("arrowup") ? 1 : 0) - (keys.has("s") || keys.has("arrowdown") ? 1 : 0);
+          const kv = (keys.has("q") || keys.has(" ") ? 1 : 0) - (keys.has("e") || keys.has("c") ? 1 : 0);
+          if (kx || ky) { vel.px += kx * 1.3; vel.py += ky * 1.3; goal = null; }
+          if (kv) { vel.vy -= kv * 1.3; goal = null; }
+          basis();
+          if (mode !== "pan" && mode !== "pinch") { if (Math.abs(vel.px) + Math.abs(vel.py) > 0.05) pan(vel.px, vel.py); vel.px *= 0.92; vel.py *= 0.92; }
+          if (mode !== "rot") { if (Math.abs(vel.ry) + Math.abs(vel.rp) > 0.05) rot(vel.ry, vel.rp); vel.ry *= 0.9; vel.rp *= 0.9; }
+          if (mode !== "lift") { if (Math.abs(vel.vy) > 0.05) lift(vel.vy); vel.vy *= 0.92; }
+          if (goal) {
+            let dy = goal.yaw - cam.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+            cam.tx += (goal.tx - cam.tx) * 0.1; cam.ty += (goal.ty - cam.ty) * 0.1; cam.tz += (goal.tz - cam.tz) * 0.1; cam.yaw += dy * 0.1;
+            cam.pitch += (goal.pitch - cam.pitch) * 0.1; cam.dist += (goal.dist - cam.dist) * 0.1;
+            if (Math.hypot(goal.tx - cam.tx, goal.ty - cam.ty, goal.tz - cam.tz) < 1 && Math.abs(dy) < 0.002 && Math.abs(goal.pitch - cam.pitch) < 0.002 && Math.abs(goal.dist - cam.dist) < 1) goal = null;
+          }
+          basis();
+          const fogR = updChunks();
+
+          ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+          const tw = performance.now() / 900;
+          for (const s of sky) {
+            const z = s[0] * Fw[0] + s[1] * Fw[1] + s[2] * Fw[2]; if (z <= 0.05) continue;
+            const x = W / 2 + ((s[0] * R[0] + s[2] * R[2]) * F) / z, y = H / 2 - ((s[0] * U[0] + s[1] * U[1] + s[2] * U[2]) * F) / z;
+            if (x < 0 || y < 0 || x > W || y > H) continue;
+            ctx.fillStyle = `rgba(200,220,255,${s[3] * (0.55 + 0.45 * Math.sin(tw + s[4] * 9))})`; ctx.fillRect(x, y, s[3] * 1.8, s[3] * 1.8);
+          }
+          grid(fogR);
+          const pt = (performance.now() - pulse) / 1200;
+          if (pt < 1) {
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 48; i++) {
+              const r = 40 + pt * 400, a0 = (i / 48) * Math.PI * 2, a1 = ((i + 1) / 48) * Math.PI * 2;
+              seg([Math.cos(a0) * r, Math.sin(a0) * r], [Math.cos(a1) * r, Math.sin(a1) * r], `rgba(120,240,255,${(1 - pt) * 0.8})`);
+            }
+          }
+
+          const items = [];
+          const fog = (o) => { let a = 1 - Math.hypot(o.x - cam.tx, o.z - cam.tz) / fogR; return a > 0 ? a * (2 - a) : 0; };
+          const add = (o) => { const a = fog(o); if (a <= 0) return; const d = toCam(o.x, o.y, o.z)[2]; if (d > NEAR) items.push([d, o, a]); };
+          for (const ch of chunks.values()) { ch.cards.forEach(add); ch.stars.forEach(add); }
+          pinned.forEach(add);
+          items.sort((p, q) => q[0] - p[0]);
+          const t = [];
+          for (const [d, o, a] of items) {
+            if (o.star) {
+              const p = proj(o.x, o.y, o.z), r = Math.max(0.6, (2.2 * F) / d);
+              ctx.fillStyle = `rgba(170,230,255,${a * (0.35 + 0.5 * o.b)})`; ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2); ctx.fill();
+            } else drawCard(o, a, t);
+          }
+          hits = t;
+
+          const txt = `x ${Math.round(cam.tx)}  y ${Math.round(cam.ty)}  z ${Math.round(cam.tz)}\nchunk (${Math.floor(cam.tx / C)}, ${Math.floor(cam.tz / C)})  zoom ${(900 / cam.dist).toFixed(2)}×  seed ${seed}`;
+          if (hud.textContent !== txt) hud.textContent = txt;
+          requestAnimationFrame(frame);
+        }
+
+        function hit(x, y) { for (let i = hits.length - 1; i >= 0; i--) { const h = hits[i]; if (x >= h.x0 && x <= h.x0 + h.w && y >= h.y0 && y <= h.y0 + h.h) return h.c; } return null; }
+
+        // pointers
+        const ptrs = new Map(); let mode = null, dragCard = null, dragOff = [0, 0], pinch = null, lastMove = 0;
+        const pinchState = () => { const [a, b] = [...ptrs.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, a: Math.atan2(b.y - a.y, b.x - a.x) }; };
+        const focusStage = () => { try { cv.focus({ preventScroll: true }); } catch (_) { cv.focus(); } };
+        cv.addEventListener("contextmenu", (e) => e.preventDefault());
+        cv.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
+        cv.addEventListener("pointerdown", (e) => {
+          if (e.button === 1) e.preventDefault();
+          focusStage(); cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, ldy: 0 }); goal = null;
+          if (ptrs.size === 1) {
+            vel.px = vel.py = vel.ry = vel.rp = vel.vy = 0;
+            const c = e.button === 0 ? hit(e.clientX, e.clientY) : null;
+            if (c) {
+              for (const ch of chunks.values()) { const i = ch.cards.indexOf(c); if (i >= 0) ch.cards.splice(i, 1); }
+              pinned.set(c.id, c); dragCard = c; cv.style.cursor = "grabbing";
+              if (e.shiftKey || e.altKey) mode = "cardY";
+              else { mode = "card"; const h = ray(e.clientX, e.clientY, c.y); dragOff = h ? [c.x - h[0], c.z - h[1]] : [0, 0]; }
+            } else mode = e.button === 1 || e.altKey ? "lift" : e.button === 2 || e.shiftKey ? "rot" : e.pointerType === "touch" ? "pan" : dragMode;
+          } else if (ptrs.size === 2) { dragCard = null; mode = "pinch"; pinch = pinchState(); vel.px = vel.py = vel.ry = vel.rp = vel.vy = 0; }
+          else if (ptrs.size === 3) { dragCard = null; mode = "lift"; vel.vy = 0; }
+        });
+        cv.addEventListener("pointermove", (e) => {
+          const p = ptrs.get(e.pointerId);
+          if (!p) { hover = hit(e.clientX, e.clientY); cv.style.cursor = hover ? "grab" : "default"; return; }
+          const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY; if (dy) p.ldy = dy; lastMove = performance.now();
+          if (mode === "pan") { pan(dx, dy); vel.px = vel.px * 0.4 + dx * 0.6; vel.py = vel.py * 0.4 + dy * 0.6; }
+          else if (mode === "rot") { rot(dx, dy); vel.ry = vel.ry * 0.4 + dx * 0.6; vel.rp = vel.rp * 0.4 + dy * 0.6; }
+          else if (mode === "lift") { const v = dy / ptrs.size; lift(v); vel.vy = vel.vy * 0.4 + v * 0.6; }
+          else if (mode === "card" && dragCard) { basis(); const h = ray(e.clientX, e.clientY, dragCard.y); if (h) { dragCard.x = h[0] + dragOff[0]; dragCard.z = h[1] + dragOff[1]; } }
+          else if (mode === "cardY" && dragCard) { basis(); const d = Math.max(toCam(dragCard.x, dragCard.y, dragCard.z)[2], NEAR * 4); dragCard.y -= (dy * d) / F; }
+          else if (mode === "pinch" && ptrs.size === 2) {
+            basis(); const n = pinchState(); zoom(pinch.d / n.d);
+            let da = n.a - pinch.a; da = Math.atan2(Math.sin(da), Math.cos(da)); cam.yaw += da;
+            const [a, b] = [...ptrs.values()];
+            if (a.ldy && b.ldy && Math.sign(a.ldy) === Math.sign(b.ldy)) rot(0, n.y - pinch.y);
+            pan(n.x - pinch.x, 0); pinch = n;
+          }
+        });
+        const up = (e) => {
+          if (!ptrs.delete(e.pointerId)) return;
+          if (performance.now() - lastMove > 90) vel.px = vel.py = vel.ry = vel.rp = vel.vy = 0;
+          if (ptrs.size === 2) { mode = "pinch"; pinch = pinchState(); vel.vy = 0; }
+          else if (ptrs.size === 1 && (mode === "pinch" || mode === "lift")) { mode = "pan"; vel.px = vel.py = vel.vy = 0; }
+          else if (ptrs.size === 0) { mode = null; dragCard = null; cv.style.cursor = hover ? "grab" : "default"; }
+        };
+        cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
+        cv.addEventListener("pointerleave", () => { if (!ptrs.size) hover = null; });
+        cv.addEventListener("wheel", (e) => { e.preventDefault(); goal = null; zoom(Math.exp(e.deltaY * (e.ctrlKey ? 0.01 : 0.0012))); }, { passive: false });
+        addEventListener("keydown", (e) => {
+          const k = e.key.toLowerCase();
+          if (k === " " && e.target && e.target.tagName === "BUTTON") return;
+          if (["w", "a", "s", "d", "q", "e", "c", " ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k) && !e.metaKey && !e.ctrlKey) { keys.add(k); if (k.startsWith("arrow") || k === " ") e.preventDefault(); }
+        });
+        addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+        cv.addEventListener("click", focusStage);
+        addEventListener("blur", () => keys.clear());
+        addEventListener("resize", resize);
+
+        const homeBtn = document.getElementById("home");
+        homeBtn.onclick = () => {
+          goal = { ...HOME }; vel.px = vel.py = vel.ry = vel.rp = vel.vy = 0; pulse = performance.now(); focusStage();
+          homeBtn.textContent = "Returning…"; homeBtn.setAttribute("aria-busy", "true");
+          const t0 = performance.now();
+          const done = () => { if (goal || performance.now() - t0 < 700) return requestAnimationFrame(done); homeBtn.textContent = "At origin ✓"; homeBtn.removeAttribute("aria-busy"); setTimeout(() => (homeBtn.textContent = "Home"), 1200); };
+          requestAnimationFrame(done);
+        };
+        document.getElementById("reseed").onclick = () => { seed = 1 + ((Math.random() * 1e6) | 0); chunks.clear(); pinned.clear(); hover = dragCard = null; makeSky(); cv.focus(); };
+
+        const modeBtn = document.getElementById("dragmode");
+        modeBtn.onclick = () => {
+          dragMode = dragMode === "pan" ? "rot" : "pan";
+          modeBtn.innerHTML = dragMode === "pan" ? "<b>Pan</b>&nbsp;/ Rotate" : "Pan /&nbsp;<b>Rotate</b>";
+          modeBtn.setAttribute("aria-pressed", dragMode === "rot" ? "true" : "false"); focusStage();
+        };
+
+        resize(); makeSky(); requestAnimationFrame(frame);
+        focusStage(); addEventListener("load", focusStage); addEventListener("focus", () => { if (document.activeElement === document.body) focusStage(); });
+      })();
+    </script>
+  </body>
+</html>
