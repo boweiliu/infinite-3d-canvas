@@ -1,0 +1,15 @@
+{
+  "name": "infinite-3d-canvas",
+  "version": "0.1.0",
+  "description": "Dependency-free 3D infinite canvas in a single HTML file",
+  "scripts": {
+    "start": "http-server -p 4173 .",
+    "test": "playwright test"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "http-server": "^14.1.1"
+  },
+  "private": true
+}
